@@ -1,125 +1,86 @@
 import streamlit as st
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point
+from streamlit_folium import st_folium
 import folium
 from folium.plugins import MarkerCluster
-from streamlit_folium import st_folium
 
+# --------------------------------------------
+# LOAD DATA
+# --------------------------------------------
+deaths_df = pd.read_csv("death.csv")
+pumps_df = pd.read_csv("Pumps.csv")
 
-# ==============================
+# --------------------------------------------
+# STREAMLIT LAYOUT
+# --------------------------------------------
+st.title("🗺️ John Snow Cholera Map (1854) – Streamlit Dashboard")
 
-# ==============================
-@st.cache_data
-def load_data():
+st.sidebar.header("Cholera 1854 Dashboard")
+page = st.sidebar.selectbox("Select view:", ["Map", "Data Table", "Summary"])
 
-   
-    deaths_df = pd.read_csv("death.csv")
-    pumps_df  = pd.read_csv("Pumps.csv")
+# --------------------------------------------
+# PAGE 1 – MAP
+# --------------------------------------------
+if page == "Map":
+    st.subheader("Peta Kematian Kolera & Pam Air")
 
-   
-    deaths_gdf = gpd.GeoDataFrame(
-        deaths_df,
-        geometry=gpd.points_from_xy(deaths_df["POINT_X"], deaths_df["POINT_Y"]),
-        crs="EPSG:27700"
-    )
+    # center map around data
+    center_y = deaths_df["POINT_Y"].mean()
+    center_x = deaths_df["POINT_X"].mean()
 
-    pumps_gdf = gpd.GeoDataFrame(
-        pumps_df,
-        geometry=gpd.points_from_xy(pumps_df["POINT_X"], pumps_df["POINT_Y"]),
-        crs="EPSG:27700"
-    )
+    m = folium.Map(location=[center_y, center_x], zoom_start=16)
 
-    
-    deaths_wgs = deaths_gdf.to_crs(epsg=4326)
-    pumps_wgs  = pumps_gdf.to_crs(epsg=4326)
+    # add deaths
+    death_cluster = MarkerCluster(name="Cholera Deaths").add_to(m)
+    for _, row in deaths_df.iterrows():
+        folium.CircleMarker(
+            location=[row["POINT_Y"], row["POINT_X"]],
+            radius=3,
+            color="blue",
+            fill=True,
+            fill_opacity=0.6,
+            popup=f"Deaths: {row['Count']}"
+        ).add_to(death_cluster)
 
-    return deaths_wgs, pumps_wgs
+    # add water pumps
+    pump_cluster = MarkerCluster(name="Water Pumps").add_to(m)
+    for _, row in pumps_df.iterrows():
+        folium.Marker(
+            location=[row["POINT_Y"], row["POINT_X"]],
+            icon=folium.Icon(color="red", icon="tint", prefix="fa"),
+            popup="Water Pump"
+        ).add_to(pump_cluster)
 
+    folium.LayerControl().add_to(m)
 
-# ==============================
-# Main App
-# ==============================
-def main():
+    st_folium(m, width=700, height=500)
 
-    st.set_page_config(page_title="John Snow 1854 Dashboard", layout="wide")
+# --------------------------------------------
+# PAGE 2 – DATA TABLE
+# --------------------------------------------
+elif page == "Data Table":
+    st.subheader("📄 Jadual Data Asal")
+    st.write("### Deaths")
+    st.dataframe(deaths_df)
+    st.write("### Pumps")
+    st.dataframe(pumps_df)
 
-    st.title("John Snow's Cholera Dashboard, 1854")
+# --------------------------------------------
+# PAGE 3 – SUMMARY
+# --------------------------------------------
+elif page == "Summary":
+    st.subheader("📊 Ringkasan Analisis")
+    total_deaths = deaths_df["Count"].sum()
+    total_points = len(deaths_df)
+    total_pumps = len(pumps_df)
 
-    st.markdown("""
-   John Snow's map is used to create an interactive representation of cholera death cases from 1854.
+    st.metric("Jumlah Lokasi Kematian", total_points)
+    st.metric("Jumlah Kematian Terkumpul", total_deaths)
+    st.metric("Jumlah Pam Air", total_pumps)
 
-    - Blue dot = death location 
-    - Red triangle = water pump location 
+    st.write("""
+    **Interpretasi Ringkas:**
+    Kawasan dengan taburan kematian paling tinggi terletak berhampiran salah satu pam air utama,
+    seiring dengan penemuan John Snow pada tahun 1854.
     """)
 
-    # -------- Load data ----------
-    deaths_gdf, pumps_gdf = load_data()
-
-    # -------- Sidebar ------------
-    st.sidebar.header("Map Settings")
-
-    show_deaths = st.sidebar.checkbox("Show deaths", value=True)
-    show_pumps  = st.sidebar.checkbox("Show water pump", value=True)
-
-   
-    if "Count" in deaths_gdf.columns:
-        max_count = int(deaths_gdf["Count"].max())
-        min_count = st.sidebar.slider(
-            "Minimum Count:",
-            1,
-            max_count,
-            1
-        )
-        deaths_plot = deaths_gdf[deaths_gdf["Count"] >= min_count].copy()
-    else:
-        deaths_plot = deaths_gdf.copy()
-
-    
-    center_x = deaths_plot.geometry.x.mean()
-    center_y = deaths_plot.geometry.y.mean()
-
-    m = folium.Map(location=[center_y, center_x], zoom_start=17)
-
-  
-    if show_deaths:
-        cluster = MarkerCluster().add_to(m)
-        for _, row in deaths_plot.iterrows():
-            popup = f"ID: {row.get('Id', '')}"
-            if "Count" in row:
-                popup += f"<br>Count: {row['Count']}"
-            folium.CircleMarker(
-                [row.geometry.y, row.geometry.x],
-                radius=3,
-                fill=True,
-                fill_opacity=0.7,
-                popup=folium.Popup(popup, max_width=200)
-            ).add_to(cluster)
-
-   
-    if show_pumps:
-        for _, row in pumps_gdf.iterrows():
-            popup = f"Pump ID: {row.get('Id', '')}"
-            folium.Marker(
-                [row.geometry.y, row.geometry.x],
-                icon=folium.Icon(color="red", icon="tint", prefix="fa"),
-                popup=popup
-            ).add_to(m)
-
-    st.subheader("Interactive Map")
-    st_folium(m, width=900, height=600)
-
-    
-    st.subheader("Source Data")
-
-    col1, col2 = st.columns(2)
-
-    col1.write("Deaths:")
-    col1.dataframe(deaths_gdf.drop(columns="geometry").head())
-
-    col2.write("Water pumps:")
-    col2.dataframe(pumps_gdf.drop(columns="geometry").head())
-
-
-if __name__ == "__main__":
-    main()
