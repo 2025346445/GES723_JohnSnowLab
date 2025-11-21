@@ -2,126 +2,148 @@ import streamlit as st
 import pandas as pd
 import folium
 from folium.plugins import MarkerCluster
-from pyproj import Transformer
 import streamlit.components.v1 as components
+import math
 
 # ---------------------------------------------------
-# 1. LOAD DATA
+# Manual conversion from EPSG:27700 (British Grid) to WGS84
+# ---------------------------------------------------
+def british_to_wgs84(easting, northing):
+    # Reference ellipsoid
+    a = 6377563.396
+    b = 6356256.909
+    F0 = 0.9996012717
+    lat0 = 49 * math.pi/180
+    lon0 = -2 * math.pi/180
+    N0 = -100000
+    E0 = 400000
+    e2 = (a*a - b*b) / (a*a)
+    n = (a - b) / (a + b)
+
+    lat = lat0
+    M = 0
+
+    # Iterate to find latitude
+    while True:
+        lat_prev = lat
+        M = b * F0 * (
+            (1 + n + (5/4)*n**2 + (5/4)*n**3) * (lat - lat0)
+            - (3*n + 3*n**2 + (21/8)*n**3) * math.sin(lat - lat0) * math.cos(lat + lat0)
+            + ((15/8)*n**2 + (15/8)*n**3) * math.sin(2*(lat - lat0)) * math.cos(2*(lat + lat0))
+            - (35/24)*n**3 * math.sin(3*(lat - lat0)) * math.cos(3*(lat + lat0))
+        )
+        lat = (northing - N0 - M) / (a * F0) + lat
+        if abs(lat - lat_prev) < 1e-10:
+            break
+
+    v = a * F0 * (1 - e2 * math.sin(lat)**2)**-0.5
+    rho = a * F0 * (1 - e2) * (1 - e2 * math.sin(lat)**2)**-1.5
+    eta2 = v/rho - 1
+
+    tan_lat = math.tan(lat)
+    sec_lat = 1 / math.cos(lat)
+
+    VII = tan_lat / (2*rho*v)
+    VIII = tan_lat / (24*rho*v**3) * (5 + 3*tan_lat**2 + eta2 - 9*tan_lat**2*eta2)
+    IX = tan_lat / (720*rho*v**5) * (61 + 90*tan_lat**2 + 45*tan_lat**4)
+    X = sec_lat / v
+    XI = sec_lat / (6 * v**3) * (v/rho + 2*tan_lat**2)
+    XII = sec_lat / (120 * v**5) * (5 + 28*tan_lat**2 + 24*tan_lat**4)
+    XIIA = sec_lat / (5040 * v**7) * (61 + 662*tan_lat**2 + 1320*tan_lat**4 + 720*tan_lat**6)
+
+    dE = easting - E0
+
+    lat_wgs = lat - VII*dE**2 + VIII*dE**4 - IX*dE**6
+    lon_wgs = lon0 + X*dE - XI*dE**3 + XII*dE**5 - XIIA*dE**7
+
+    return (lat_wgs * 180/math.pi, lon_wgs * 180/math.pi)
+
+# ---------------------------------------------------
+# LOAD DATA
 # ---------------------------------------------------
 deaths_df = pd.read_csv("death.csv")
 pumps_df = pd.read_csv("Pumps.csv")
 
-# ---------------------------------------------------
-# 2. TRANSFORM COORDINATES (British EPSG:27700 -> WGS84)
-# ---------------------------------------------------
-transformer = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
-
-def convert_xy_to_latlon(df, x_col="POINT_X", y_col="POINT_Y"):
-    lons = []
-    lats = []
-    for _, row in df[[x_col, y_col]].iterrows():
-        lon, lat = transformer.transform(row[x_col], row[y_col])
-        lons.append(lon)
-        lats.append(lat)
-    df = df.copy()
-    df["lon"] = lons
-    df["lat"] = lats
-    return df
-
-deaths_ll = convert_xy_to_latlon(deaths_df)
-pumps_ll = convert_xy_to_latlon(pumps_df)
+# Convert coordinates
+deaths_df["lat"], deaths_df["lon"] = zip(*deaths_df.apply(lambda r: british_to_wgs84(r["POINT_X"], r["POINT_Y"]), axis=1))
+pumps_df["lat"], pumps_df["lon"] = zip(*pumps_df.apply(lambda r: british_to_wgs84(r["POINT_X"], r["POINT_Y"]), axis=1))
 
 # ---------------------------------------------------
-# 3. STREAMLIT LAYOUT
+# STREAMLIT UI
 # ---------------------------------------------------
-st.set_page_config(page_title="John Snow Cholera Map 1854", layout="wide")
+st.set_page_config(page_title="John Snow 1854 Cholera Map", layout="wide")
 
-st.title("🗺️ John Snow 1854 Cholera Map Dashboard")
+st.title("🗺️ John Snow’s 1854 Cholera Map Dashboard")
 
 st.markdown("""
-This dashboard visualizes the historic 1854 cholera outbreak in Soho, London, 
-based on John Snow’s famous epidemiological map.
-
-- Blue dots represent cholera death locations  
-- Red markers represent water pump locations  
+This dashboard visualizes the famous 1854 cholera outbreak in Soho, London,
+mapping both death cases and water pumps as originally studied by Dr. John Snow.
 """)
 
-# Sidebar navigation
-page = st.sidebar.selectbox("Select View:", ["Map", "Data Table", "Summary"])
+page = st.sidebar.selectbox("Select View", ["Map", "Data Table", "Summary"])
 
 # ---------------------------------------------------
-# 4. MAP VIEW
+# MAP VIEW
 # ---------------------------------------------------
 if page == "Map":
-    st.subheader("Interactive Map of Cholera Deaths and Water Pumps")
+    st.subheader("Interactive Map")
 
-    # Center map
-    center_lat = deaths_ll["lat"].mean()
-    center_lon = deaths_ll["lon"].mean()
+    m = folium.Map(location=[deaths_df["lat"].mean(), deaths_df["lon"].mean()], zoom_start=17)
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=17)
-
-    # Death locations
+    # Deaths
     death_cluster = MarkerCluster(name="Cholera Deaths").add_to(m)
-    for _, row in deaths_ll.iterrows():
-        popup_text = f"Deaths Count: {row.get('Count', '')}"
+    for _, row in deaths_df.iterrows():
         folium.CircleMarker(
             location=[row["lat"], row["lon"]],
             radius=3,
             color="blue",
             fill=True,
-            fill_opacity=0.6,
-            popup=popup_text
+            fill_opacity=0.5,
+            popup=f"Deaths Count: {row.get('Count')}"
         ).add_to(death_cluster)
 
-    # Water pumps
+    # Pumps
     pump_cluster = MarkerCluster(name="Water Pumps").add_to(m)
-    for _, row in pumps_ll.iterrows():
-        popup_text = f"Pump ID: {row.get('Id', '')}"
+    for _, row in pumps_df.iterrows():
         folium.Marker(
             location=[row["lat"], row["lon"]],
-            icon=folium.Icon(color="red", icon="tint", prefix="fa"),
-            popup=popup_text
+            popup=f"Pump ID: {row.get('Id')}",
+            icon=folium.Icon(color="red", icon="tint", prefix="fa")
         ).add_to(pump_cluster)
 
     folium.LayerControl().add_to(m)
 
-    # Render folium map
-    components.html(m._repr_html_(), height=600, scrolling=False)
+    components.html(m._repr_html_(), height=600)
 
 # ---------------------------------------------------
-# 5. DATA TABLE VIEW
+# DATA TABLE
 # ---------------------------------------------------
 elif page == "Data Table":
-    st.subheader("📄 Source Data Tables")
-    st.write("### Cholera Deaths Data")
-    st.dataframe(deaths_ll)
-    st.write("### Water Pump Locations")
-    st.dataframe(pumps_ll)
+    st.subheader("Cholera Deaths Table")
+    st.dataframe(deaths_df)
+
+    st.subheader("Water Pump Locations")
+    st.dataframe(pumps_df)
 
 # ---------------------------------------------------
-# 6. SUMMARY VIEW
+# SUMMARY
 # ---------------------------------------------------
 elif page == "Summary":
-    st.subheader("📊 Summary of Analysis")
+    st.subheader("Summary Statistics")
 
-    total_death_locations = len(deaths_ll)
-    total_deaths = deaths_ll["Count"].sum() if "Count" in deaths_ll.columns else "N/A"
-    total_pumps = len(pumps_ll)
+    total_locations = len(deaths_df)
+    total_deaths = deaths_df["Count"].sum()
+    total_pumps = len(pumps_df)
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Death Locations", total_death_locations)
-    col2.metric("Total Death Count", total_deaths)
-    col3.metric("Total Water Pumps", total_pumps)
+    col1.metric("Death Locations", total_locations)
+    col2.metric("Deaths Count", total_deaths)
+    col3.metric("Water Pumps", total_pumps)
 
     st.markdown("""
-    **Brief Interpretation:**
+    **Interpretation:**
 
-    - Blue dots indicate the geographic distribution of cholera fatalities.
-    - Red pump markers show the water sources available during the outbreak.
-    - The clustering of deaths around a specific pump supports 
-      John Snow’s conclusion that contaminated water was the source of the outbreak.
-
-    This dashboard demonstrates how modern GIS and Python can recreate
-    historic epidemiological analyses.
+    - Most cholera deaths cluster around a specific pump.
+    - This supports John Snow’s hypothesis that contaminated water spread the disease.
+    - Spatial analysis helps reveal unseen patterns in epidemiology.
     """)
